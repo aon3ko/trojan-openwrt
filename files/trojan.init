@@ -1,0 +1,115 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+
+START=99
+
+json_add_ssl_alpn_port_override() {
+	# list ssl_alpn_port_override 'h2:81'
+	json_add_int "${1%:*}" "${1##*:}"
+}
+
+generate_json() {
+	json_init
+	json_add_string run_type "$(config_get "$1" run_type)"
+	json_add_string local_addr "$(config_get "$1" local_addr)"
+	json_add_int local_port "$(config_get "$1" local_port)"
+	json_add_string remote_addr "$(config_get "$1" remote_addr)"
+	json_add_int remote_port "$(config_get "$1" remote_port)"
+	json_add_string target_addr "$(config_get "$1" target_addr)"
+	json_add_int target_port "$(config_get "$1" target_port)"
+	json_add_array password
+		config_list_foreach "$1" password "json_add_string ''"
+	json_close_array
+	json_add_int udp_timeout "$(config_get "$1" udp_timeout)"
+	json_add_int log_level "$(config_get "$1" log_level)"
+	json_add_object ssl
+		json_add_boolean verify "$(get_bool "$(config_get "$1" ssl_verify)")"
+		json_add_boolean verify_hostname "$(get_bool "$(config_get "$1" ssl_verify_hostname)")"
+		json_add_string cert "$(config_get "$1" ssl_cert)"
+		json_add_string key "$(config_get "$1" ssl_key)"
+		json_add_string key_password "$(config_get "$1" ssl_key_password)"
+		json_add_string cipher "$(config_get "$1" ssl_cipher)"
+		json_add_string cipher_tls13 "$(config_get "$1" ssl_cipher_tls13)"
+		json_add_boolean prefer_server_cipher "$(get_bool "$(config_get "$1" ssl_prefer_server_cipher)")"
+		json_add_string sni "$(config_get "$1" ssl_sni)"
+		json_add_array alpn
+			config_list_foreach "$1" ssl_alpn "json_add_string ''"
+		json_close_array
+		json_add_object alpn_port_override
+			config_list_foreach "$1" ssl_alpn_port_override json_add_ssl_alpn_port_override
+		json_close_object
+		json_add_boolean reuse_session "$(get_bool "$(config_get "$1" ssl_reuse_session)")"
+		json_add_boolean session_ticket "$(get_bool "$(config_get "$1" ssl_session_ticket)")"
+		json_add_int session_timeout "$(config_get "$1" ssl_session_timeout)"
+		json_add_string plain_http_response "$(config_get "$1" ssl_plain_http_response)"
+		json_add_string curves "$(config_get "$1" ssl_curves)"
+		json_add_string dhparam "$(config_get "$1" ssl_dhparam)"
+	json_close_object
+	json_add_object tcp
+		json_add_boolean prefer_ipv4 "$(get_bool "$(config_get "$1" tcp_prefer_ipv4)")"
+		json_add_boolean no_delay "$(get_bool "$(config_get "$1" tcp_no_delay)")"
+		json_add_boolean keep_alive "$(get_bool "$(config_get "$1" tcp_keep_alive)")"
+		json_add_boolean reuse_port "$(get_bool "$(config_get "$1" tcp_reuse_port)")"
+		json_add_boolean fast_open "$(get_bool "$(config_get "$1" tcp_fast_open)")"
+		json_add_int fast_open_qlen "$(config_get "$1" tcp_fast_open_qlen)"
+	json_close_object
+	json_add_object mysql
+		json_add_boolean enabled "$(get_bool "$(config_get "$1" mysql_enabled)")"
+		json_add_string server_addr "$(config_get "$1" mysql_server_addr)"
+		json_add_int server_port "$(config_get "$1" mysql_server_port)"
+		json_add_string database "$(config_get "$1" mysql_database)"
+		json_add_string username "$(config_get "$1" mysql_username)"
+		json_add_string password "$(config_get "$1" mysql_password)"
+		json_add_string key "$(config_get "$1" mysql_key)"
+		json_add_string cert "$(config_get "$1" mysql_cert)"
+		json_add_string ca "$(config_get "$1" mysql_ca)"
+	json_close_object
+
+	json_dump > "/var/run/trojan/$1.json"
+}
+
+trojan_arguments() {
+	[ "$(config_get "$1" LogFile)" != "" ] && procd_append_param command -l "$(config_get "$1" LogFile)"
+	[ "$(config_get "$1" KeyLogFile)" != "" ] && procd_append_param command -k "$(config_get "$1" KeyLogFile)"
+}
+
+trojan_start() {
+	[ "$(get_bool "$(config_get "$1" Disabled)" 1)" = "1" ] && return
+
+	local json_file
+
+	if [ "$(config_get "$1" json)" != "" ]; then
+		json_file="$(config_get "$1" json)"
+	else
+		generate_json "$1" || return 1
+		json_file="/var/run/trojan/$1.json"
+	fi
+
+	procd_open_instance "$1"
+	procd_set_param command trojan -c "${json_file}"
+	trojan_arguments "$1"
+	procd_set_param file "${json_file}"
+	procd_set_param pidfile "/var/run/trojan/$1.pid"
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+# ===== Begin of PROCD part ===== #
+
+start_service() {
+	umask 077
+	mkdir -p /var/run/trojan
+	config_load trojan
+	if [ "$1" != "" ]; then
+		trojan_start "$1"
+	else
+		config_foreach trojan_start trojan
+	fi
+}
+
+service_data() {
+	trojan -v 2>&1
+}
